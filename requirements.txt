@@ -8,3 +8,5 @@ pystac-client
 requests
 pandas
 streamlit
+folium
+streamlit-folium
