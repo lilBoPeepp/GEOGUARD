@@ -7,8 +7,11 @@ import tempfile
 from dataclasses import fields
 from pathlib import Path
 
+import folium
 import pandas as pd
+import requests
 import streamlit as st
+from streamlit_folium import st_folium
 
 import napoleonic as nap
 
@@ -16,12 +19,31 @@ st.set_page_config(page_title="Napoleonic", page_icon="🛰️", layout="wide")
 st.title("🛰️ Napoleonic")
 st.caption("Rapid terrain and infrastructure mapping from Sentinel-2 satellite imagery")
 
+# ------------------------------------------------------------------ state
+ss = st.session_state
+ss.setdefault("lat", 48.74)
+ss.setdefault("lon", 37.58)
+ss.setdefault("zoom", 11)
+if "pending" in ss:  # a map click or search result waiting to be applied
+    ss["lat"], ss["lon"] = ss.pop("pending")
+
+
+def geocode(q):
+    """Place-name search via OpenStreetMap Nominatim (free, rate-limited)."""
+    r = requests.get("https://nominatim.openstreetmap.org/search",
+                     params={"q": q, "format": "json", "limit": 1},
+                     headers={"User-Agent": "napoleonic-hackathon-prototype"}, timeout=15)
+    r.raise_for_status()
+    hit = r.json()
+    return (float(hit[0]["lat"]), float(hit[0]["lon"])) if hit else None
+
+
 # ------------------------------------------------------------------ sidebar
 with st.sidebar:
     st.header("Area of interest")
     mode = st.radio("Data source", ["Demo (synthetic scene)", "Live Sentinel-2"])
-    lat = st.number_input("Latitude", value=48.74, format="%.4f", disabled=mode.startswith("Demo"))
-    lon = st.number_input("Longitude", value=37.58, format="%.4f", disabled=mode.startswith("Demo"))
+    lat = st.number_input("Latitude", key="lat", format="%.4f", disabled=mode.startswith("Demo"))
+    lon = st.number_input("Longitude", key="lon", format="%.4f", disabled=mode.startswith("Demo"))
     radius = st.slider("Radius (km)", 1.0, 12.0, 3.0, 0.5, disabled=mode.startswith("Demo"))
     max_cloud = st.slider("Max cloud cover (%)", 5, 80, 30, disabled=mode.startswith("Demo"))
     lookback = st.slider("Search back (days)", 5, 90, 30, disabled=mode.startswith("Demo"))
@@ -39,6 +61,42 @@ with st.sidebar:
         p.tall_m = st.slider("Multi-storey height (m, OSM)", 6.0, 30.0, p.tall_m, 1.0)
 
     run = st.button("Run analysis", type="primary", width="stretch")
+
+# ------------------------------------------------------------------ map picker
+if mode.startswith("Live"):
+    with st.expander("📍 Pick the area on the map", expanded="out" not in ss):
+        q = st.text_input("Search a place (optional)", placeholder="e.g. Kramatorsk, Ukraine")
+        if q and q != ss.get("last_query"):
+            ss["last_query"] = q
+            try:
+                found = geocode(q)
+                if found:
+                    ss["pending"] = found
+                    ss["zoom"] = 12
+                    st.rerun()
+                else:
+                    st.warning("Place not found.")
+            except Exception as e:
+                st.warning(f"Search failed: {e}")
+        st.caption("Click anywhere on the map to set the centre. The circle shows the analysis radius.")
+        m = folium.Map(location=[lat, lon], zoom_start=ss["zoom"], tiles=None, control_scale=True)
+        folium.TileLayer(
+            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            attr="Esri World Imagery", name="Satellite").add_to(m)
+        folium.TileLayer("OpenStreetMap", name="Streets").add_to(m)
+        folium.LayerControl().add_to(m)
+        folium.Circle([lat, lon], radius=radius * 1000, color="#facc15", weight=3,
+                      fill=True, fill_opacity=0.12).add_to(m)
+        folium.Marker([lat, lon]).add_to(m)
+        ret = st_folium(m, height=480, width=None, returned_objects=["last_clicked", "zoom"], key="picker")
+        if ret:
+            if ret.get("zoom"):
+                ss["zoom"] = ret["zoom"]
+            click = ret.get("last_clicked")
+            if click and (round(click["lat"], 4), round(click["lng"], 4)) != (round(lat, 4), round(lon, 4)):
+                ss["pending"] = (click["lat"], click["lng"])
+                st.rerun()
+        st.write(f"**Selected:** {lat:.4f}, {lon:.4f}  |  radius {radius} km")
 
 # ------------------------------------------------------------------ run
 if run:
